@@ -242,29 +242,89 @@ def get_unc_schedule(sport):
 def run_bot():
     """Main bot execution - runs once"""
     print(f"🚀 UNC Game Thread Bot starting...")
-    print(f"📅 {datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %I:%M:%S %p ET')}")
+    print(f"📅 {datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %I:%M:%S %p ET')}\n")
+    
+    # Validate credentials are loaded
+    print("🔍 Checking credentials...")
+    missing = []
+    if not REDDIT_CLIENT_ID:
+        missing.append("REDDIT_CLIENT_ID")
+    if not REDDIT_CLIENT_SECRET:
+        missing.append("REDDIT_CLIENT_SECRET")
+    if not REDDIT_USERNAME:
+        missing.append("REDDIT_USERNAME")
+    if not REDDIT_PASSWORD:
+        missing.append("REDDIT_PASSWORD")
+    
+    if missing:
+        print(f"❌ ERROR: Missing credentials: {', '.join(missing)}")
+        print("   Check your GitHub Secrets are set correctly!")
+        return
+    
+    print(f"✅ Client ID: {REDDIT_CLIENT_ID[:10]}...")
+    print(f"✅ Client Secret: {REDDIT_CLIENT_SECRET[:10]}...")
+    print(f"✅ Username: {REDDIT_USERNAME}")
+    print(f"✅ Subreddit: {SUBREDDIT_NAME}\n")
     
     # Load state
+    print("📂 Loading bot state...")
     state = load_state()
     if 'posted_threads' not in state:
         state['posted_threads'] = {}
     if 'active_games' not in state:
         state['active_games'] = {}
+    print(f"✅ State loaded: {len(state.get('active_games', {}))} active games\n")
     
     # Initialize Reddit
-    reddit = get_reddit_client()
-    subreddit = reddit.subreddit(SUBREDDIT_NAME)
+    print("🔑 Authenticating with Reddit...")
+    try:
+        reddit = get_reddit_client()
+        # Test authentication by getting user info
+        me = reddit.user.me()
+        print(f"✅ Logged in as: u/{me.name}")
+        print(f"✅ Account karma: {me.link_karma + me.comment_karma}\n")
+    except Exception as e:
+        print(f"❌ REDDIT AUTH FAILED!")
+        print(f"   Error: {str(e)}")
+        print(f"\n🔧 Troubleshooting:")
+        print(f"   1. Is your password correct in GitHub Secrets?")
+        print(f"   2. Is 2FA disabled on u/{REDDIT_USERNAME}?")
+        print(f"   3. Is your email verified?")
+        print(f"   4. Have you posted/commented with this account manually?")
+        print(f"   5. Is the account older than 1 hour?")
+        return
+    
+    # Get subreddit
+    try:
+        subreddit = reddit.subreddit(SUBREDDIT_NAME)
+        # Test subreddit access
+        _ = subreddit.display_name
+        print(f"✅ Connected to r/{SUBREDDIT_NAME}\n")
+    except Exception as e:
+        print(f"❌ SUBREDDIT ACCESS FAILED!")
+        print(f"   Error: {str(e)}")
+        print(f"   Check: Can u/{REDDIT_USERNAME} post to r/{SUBREDDIT_NAME}?")
+        return
     
     # Check both sports
     for sport in ['basketball', 'football']:
-        print(f"\n🔍 Checking {sport}...")
+        print(f"🔍 Checking {sport}...")
         
-        schedule = get_unc_schedule(sport)
-        if not schedule:
+        try:
+            schedule = get_unc_schedule(sport)
+            if not schedule:
+                print(f"⚠️  Could not fetch {sport} schedule from ESPN\n")
+                continue
+            
+            events = schedule.get('events', [])
+            print(f"   Found {len(events)} games on schedule")
+            
+            if len(events) == 0:
+                print(f"   No {sport} games scheduled\n")
+                continue
+        except Exception as e:
+            print(f"❌ Error fetching {sport} schedule: {str(e)}\n")
             continue
-        
-        events = schedule.get('events', [])
-        print(f"   Found {len(events)} games")
         
         for event in events:
             game_id = event.get('id')
@@ -274,6 +334,7 @@ def run_bot():
             # Get detailed game data
             game_data = get_game_details(game_id, sport)
             if not game_data:
+                print(f"   ⚠️  Could not fetch details for game {game_id}")
                 continue
             
             competition = game_data.get('header', {}).get('competitions', [{}])[0]
@@ -281,69 +342,121 @@ def run_bot():
             game_date_str = competition.get('date', '')
             
             if not game_date_str:
+                print(f"   ⚠️  Game {game_id} has no date")
                 continue
+            
+            # Get team names for display
+            competitors = competition.get('competitors', [])
+            home_team = next((t for t in competitors if t.get('homeAway') == 'home'), {})
+            away_team = next((t for t in competitors if t.get('homeAway') == 'away'), {})
+            home_name = home_team.get('team', {}).get('displayName', 'Home')
+            away_name = away_team.get('team', {}).get('displayName', 'Away')
+            
+            print(f"\n   🏟️  {away_name} @ {home_name}")
             
             game_time = datetime.strptime(game_date_str, '%Y-%m-%dT%H:%M%SZ')
             game_time = game_time.replace(tzinfo=pytz.UTC)
+            
+            # Show game status
+            time_until = game_time - datetime.now(pytz.UTC)
+            hours_until = time_until.total_seconds() / 3600
+            
+            if is_game_final(status):
+                print(f"      Status: ✅ Game finished")
+            elif is_game_live(status):
+                print(f"      Status: 🔴 LIVE NOW")
+            elif hours_until < 0:
+                print(f"      Status: ⏰ Should have started")
+            elif hours_until <= 3:
+                print(f"      Status: ⏰ Starts in {int(hours_until)}h {int((hours_until % 1) * 60)}m - Pre-game time!")
+            else:
+                et = pytz.timezone('US/Eastern')
+                game_time_et = game_time.astimezone(et)
+                print(f"      Status: 📅 {game_time_et.strftime('%b %d, %I:%M %p ET')} ({int(hours_until)}h away)")
             
             thread_key = f"{sport}_{game_id}"
             
             # Check for pre-game thread
             if should_post_pregame(game_time, state, thread_key):
                 print(f"📝 Posting pre-game thread for game {game_id}")
-                title, body = format_pregame_thread(game_data, sport)
-                submission = subreddit.submit(title, selftext=body)
-                
-                if 'pregame' not in state['posted_threads']:
-                    state['posted_threads']['pregame'] = {}
-                state['posted_threads']['pregame'][thread_key] = submission.id
-                print(f"✅ Posted: {submission.shortlink}")
+                try:
+                    title, body = format_pregame_thread(game_data, sport)
+                    submission = subreddit.submit(title, selftext=body)
+                    
+                    if 'pregame' not in state['posted_threads']:
+                        state['posted_threads']['pregame'] = {}
+                    state['posted_threads']['pregame'][thread_key] = submission.id
+                    print(f"✅ Posted: {submission.shortlink}\n")
+                except Exception as e:
+                    print(f"❌ Failed to post pre-game thread!")
+                    print(f"   Error: {str(e)}\n")
             
             # Check for game thread
             if is_game_live(status):
                 if thread_key not in state['active_games']:
                     print(f"🏁 Posting game thread for game {game_id}")
-                    title, body = format_game_thread(game_data, sport)
-                    submission = subreddit.submit(title, selftext=body)
-                    
-                    state['active_games'][thread_key] = submission.id
-                    
                     try:
-                        submission.mod.sticky()
-                        print(f"📌 Stickied thread")
-                    except:
-                        pass
-                    
-                    print(f"✅ Posted: {submission.shortlink}")
+                        title, body = format_game_thread(game_data, sport)
+                        submission = subreddit.submit(title, selftext=body)
+                        
+                        state['active_games'][thread_key] = submission.id
+                        
+                        try:
+                            submission.mod.sticky()
+                            print(f"📌 Stickied thread")
+                        except Exception as e:
+                            print(f"⚠️  Could not sticky (may need mod permissions): {str(e)}")
+                        
+                        print(f"✅ Posted: {submission.shortlink}\n")
+                    except Exception as e:
+                        print(f"❌ Failed to post game thread!")
+                        print(f"   Error: {str(e)}\n")
                 else:
                     # Update existing thread
                     print(f"🔄 Updating game thread for game {game_id}")
-                    submission_id = state['active_games'][thread_key]
-                    title, body = format_game_thread(game_data, sport)
-                    submission = reddit.submission(id=submission_id)
-                    submission.edit(body)
-                    print(f"✅ Updated")
+                    try:
+                        submission_id = state['active_games'][thread_key]
+                        title, body = format_game_thread(game_data, sport)
+                        submission = reddit.submission(id=submission_id)
+                        submission.edit(body)
+                        print(f"✅ Updated\n")
+                    except Exception as e:
+                        print(f"❌ Failed to update game thread!")
+                        print(f"   Error: {str(e)}\n")
             
             # Check for post-game thread
             if is_game_final(status):
                 if thread_key in state['active_games']:
                     print(f"🏆 Posting post-game thread for game {game_id}")
-                    title, body = format_postgame_thread(game_data, sport)
-                    submission = subreddit.submit(title, selftext=body)
-                    
                     try:
-                        game_thread = reddit.submission(id=state['active_games'][thread_key])
-                        game_thread.mod.sticky(state=False)
-                        submission.mod.sticky()
-                    except:
-                        pass
-                    
-                    del state['active_games'][thread_key]
-                    print(f"✅ Posted: {submission.shortlink}")
+                        title, body = format_postgame_thread(game_data, sport)
+                        submission = subreddit.submit(title, selftext=body)
+                        
+                        try:
+                            game_thread = reddit.submission(id=state['active_games'][thread_key])
+                            game_thread.mod.sticky(state=False)
+                            submission.mod.sticky()
+                        except Exception as e:
+                            print(f"⚠️  Could not manage stickies: {str(e)}")
+                        
+                        del state['active_games'][thread_key]
+                        print(f"✅ Posted: {submission.shortlink}\n")
+                    except Exception as e:
+                        print(f"❌ Failed to post post-game thread!")
+                        print(f"   Error: {str(e)}\n")
     
     # Save state
     save_state(state)
-    print(f"\n✨ Run complete!")
+    
+    # Print summary
+    print(f"\n{'='*50}")
+    print(f"✨ Run complete!")
+    print(f"{'='*50}")
+    print(f"📊 Summary:")
+    print(f"   Active game threads: {len(state.get('active_games', {}))}")
+    print(f"   Total posted threads: {sum(len(v) for v in state.get('posted_threads', {}).values())}")
+    print(f"   Next check: 5 minutes")
+    print(f"{'='*50}\n")
 
 if __name__ == "__main__":
     run_bot()
